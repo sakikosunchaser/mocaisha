@@ -37,49 +37,16 @@ npm test
 
 生产构建生成 `dist/`。设置 `PORT` 可修改服务端端口；生产环境可将 `CLIENT_ORIGIN` 设置为允许的前端来源。
 
-## GitHub 自动部署
+## 发布到 GitHub 与手动更新服务器
 
-将项目放进 GitHub 仓库后，推送到 `main` 或 `master` 分支会自动运行测试、构建并部署到服务器；也可在 GitHub Actions 页面手动运行部署。首次配置只需一次：
+推送到 GitHub 仅用于备份和保存代码，不会自动更新服务器。当前仓库 `sakikosunchaser/mocaisha` 是公开仓库，推送后所有人都可以查看源码。
 
-1. 在 GitHub 创建空仓库，并确认可见性。当前配置的 `sakikosunchaser/mocaisha` 是公开仓库，推送后所有人都可以查看代码；如要保护源码，应先在 GitHub 将其改为私有。首次推送前，先完成服务器 SSH 部署账号和仓库 Secrets 配置。
-2. 在服务器上创建专用部署账号，并允许其写入 `/opt/mosaica`、重启服务：
+本地提交并推送代码：
 
-   ```bash
-   apt update && apt install -y sudo
-   useradd --create-home --shell /bin/bash mosaica-deploy
-   install -d -o mosaica-deploy -g mosaica-deploy /opt/mosaica
-   chown -R mosaica-deploy:mosaica-deploy /opt/mosaica
-   install -d /etc/systemd/system/mosaica.service.d
-   printf '[Service]\nUser=mosaica-deploy\nGroup=mosaica-deploy\n' > /etc/systemd/system/mosaica.service.d/override.conf
-   systemctl daemon-reload
-   systemctl restart mosaica
-   systemctl status mosaica --no-pager -l
-   printf '%s\n' 'mosaica-deploy ALL=(root) NOPASSWD: /usr/bin/systemctl restart mosaica, /usr/bin/systemctl status mosaica --no-pager -l' > /etc/sudoers.d/mosaica-deploy
-   chmod 440 /etc/sudoers.d/mosaica-deploy
-   visudo -cf /etc/sudoers.d/mosaica-deploy
-   install -d -o mosaica-deploy -g mosaica-deploy -m 700 /home/mosaica-deploy/.ssh
-   ```
+```powershell
+git add .
+git commit -m "Describe your changes"
+git push origin main
+```
 
-3. 在自己的电脑上生成专用 SSH 密钥。私钥只添加到 GitHub Secrets，公钥安装到服务器账号：
-
-   ```powershell
-   ssh-keygen -t ed25519 -C "github-actions-mosaica" -f "$HOME\.ssh\mosaica_deploy"
-   Get-Content "$HOME\.ssh\mosaica_deploy.pub"
-   ```
-
-   将公钥整行添加到服务器 `/home/mosaica-deploy/.ssh/authorized_keys`，然后设置权限：
-
-   ```bash
-   chown mosaica-deploy:mosaica-deploy /home/mosaica-deploy/.ssh/authorized_keys
-   chmod 600 /home/mosaica-deploy/.ssh/authorized_keys
-   ```
-
-4. 在服务器运行 `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` 记下 SSH 主机指纹；在本机运行 `ssh-keyscan -t ed25519 -p 22 110.42.33.50` 取得 known_hosts 行，并核对其指纹与服务器一致。
-5. 在 GitHub 仓库 **Settings → Secrets and variables → Actions → New repository secret** 添加：
-   - `DEPLOY_HOST`：服务器 IP，例如 `110.42.33.50`
-   - `DEPLOY_USER`：`mosaica-deploy`
-   - `DEPLOY_PORT`：`22`
-   - `DEPLOY_SSH_KEY`：`mosaica_deploy` 私钥文件的完整内容（不要提交或发送给任何人）
-   - `DEPLOY_KNOWN_HOSTS`：已核对指纹的 `ssh-keyscan` 输出行
-
-完成后，每次 `git push` 到 `main`，GitHub Actions 会自动部署并检查 `/health`。失败时可在 GitHub Actions 页面查看日志。GitHub Actions workflow 使用 `actions/checkout@v4` 和 `actions/setup-node@v4`；生产部署会在服务器重新安装依赖、运行测试和构建，再重启 systemd 服务。
+服务器更新需单独手动进行：将项目文件上传到 `/opt/mosaica`，在该目录运行 `npm ci`、`npm test` 和 `npm run build`，然后重启服务 `systemctl restart mosaica` 并检查 `http://127.0.0.1:3001/health`。请勿上传 `.env` 或 SSH 私钥。
