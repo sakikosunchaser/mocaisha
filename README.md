@@ -49,4 +49,25 @@ git commit -m "Describe your changes"
 git push origin main
 ```
 
-服务器更新需单独手动进行：将项目文件上传到 `/opt/mosaica`，在该目录运行 `npm ci`、`npm test` 和 `npm run build`，然后重启服务 `systemctl restart mosaica` 并检查 `http://127.0.0.1:3001/health`。请勿上传 `.env` 或 SSH 私钥。
+服务器更新需单独手动进行。在项目目录的 PowerShell 中打包并上传（按需替换服务器地址或登录账号）：
+
+```powershell
+tar -czf "$env:TEMP\mosaica.tar.gz" --exclude=.git --exclude=node_modules --exclude=dist --exclude=server-dist --exclude=.env --exclude=".env.*" .
+scp "$env:TEMP\mosaica.tar.gz" root@110.42.33.50:/tmp/mosaica.tar.gz
+ssh root@110.42.33.50
+```
+
+登录服务器后执行：
+
+```bash
+tar -xzf /tmp/mosaica.tar.gz -C /opt/mosaica
+cd /opt/mosaica
+npm ci
+npm test
+npm run build
+npm prune --omit=dev
+systemctl restart mosaica
+curl -fsS http://127.0.0.1:3001/health
+```
+
+请勿上传 `.env` 或 SSH 私钥。
