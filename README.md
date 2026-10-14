@@ -49,36 +49,48 @@ git commit -m "Describe your changes"
 git push origin main
 ```
 
-服务器更新需单独手动进行。此公开仓库可通过 HTTPS 直接克隆，不需要 SSH 密钥或 GitHub token。
-
-首次从服务器部署时，在服务器终端以 root 执行以下命令。它会先在新目录克隆、测试和构建；成功后才切换 `/opt/mosaica`，并保留旧版本备份：
+服务器更新需单独手动进行。此公开仓库可通过 HTTPS 直接克隆，不需要 SSH 密钥或 GitHub token。首次迁移和后续更新都在服务器 root 终端中一次性执行下面整段命令。它先在独立目录克隆、测试和构建；成功后才切换版本，并在健康检查失败时恢复旧目录。请勿分开执行其中的命令，因为目录变量只在当前终端会话中有效。
 
 ```bash
-apt update && apt install -y git
-cd /opt
-DEPLOY_DIR="/opt/mosaica-next-$(date +%Y%m%d-%H%M%S)"
-BACKUP_DIR="/opt/mosaica-backup-$(date +%Y%m%d-%H%M%S)"
-git clone --branch main https://github.com/sakikosunchaser/mocaisha.git "$DEPLOY_DIR"
-chown -R mosaica-deploy:mosaica-deploy "$DEPLOY_DIR"
-runuser -u mosaica-deploy -- bash -lc "cd '$DEPLOY_DIR' && npm ci && npm test && npm run build && npm prune --omit=dev"
-```
-
-只有在上面的测试和构建全部成功后，再切换并检查服务：
-
-```bash
+set -eu
+if ! command -v git >/dev/null 2>&1; then
+  apt update
+  apt install -y git
+fi
+STAMP="$(date +%Y%m%d-%H%M%S)"
+NEXT="/opt/mosaica-next-$STAMP"
+BACKUP="/opt/mosaica-backup-$STAMP"
+FAILED="/opt/mosaica-failed-$STAMP"
+runuser -u mosaica-deploy -- git clone --branch main https://github.com/sakikosunchaser/mocaisha.git "$NEXT"
+runuser -u mosaica-deploy -- bash -lc "cd '$NEXT' && npm ci && npm test && npm run build && npm prune --omit=dev"
 systemctl stop mosaica
-mv /opt/mosaica "$BACKUP_DIR"
-mv "$DEPLOY_DIR" /opt/mosaica
+if [ -e /opt/mosaica ]; then
+  mv /opt/mosaica "$BACKUP"
+fi
+if ! mv "$NEXT" /opt/mosaica; then
+  if [ -e "$BACKUP" ]; then mv "$BACKUP" /opt/mosaica; fi
+  systemctl start mosaica
+  exit 1
+fi
 systemctl start mosaica
-curl -fsS http://127.0.0.1:3001/health
+for attempt in $(seq 1 20); do
+  if curl --fail --silent http://127.0.0.1:3001/health; then
+    echo
+    echo "Mosaica update succeeded."
+    exit 0
+  fi
+  sleep 1
+done
+echo "Health check failed; restoring the previous version."
+systemctl stop mosaica || true
+mv /opt/mosaica "$FAILED"
+if [ -e "$BACKUP" ]; then
+  mv "$BACKUP" /opt/mosaica
+  systemctl start mosaica
+  curl --fail --silent http://127.0.0.1:3001/health
+  echo
+fi
+exit 1
 ```
 
-之后每次更新，在服务器 root 终端执行以下命令，从 GitHub 拉取最新 `main`、测试构建并重启服务：
-
-```bash
-runuser -u mosaica-deploy -- bash -lc 'cd /opt/mosaica && git pull --ff-only origin main && npm ci && npm test && npm run build && npm prune --omit=dev'
-systemctl restart mosaica
-curl -fsS http://127.0.0.1:3001/health
-```
-
-如果更新失败，不要重启服务；当前运行的版本会继续提供服务。请勿在仓库或服务器项目目录中保存 SSH 私钥。
+成功时会打印 `Mosaica update succeeded.` 以及 `{"status":"ok"}`。如果测试或构建失败，脚本会在切换前停止，不影响当前服务。请勿在仓库或服务器项目目录中保存 SSH 私钥。
