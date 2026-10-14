@@ -127,6 +127,25 @@ describe("RoomManager", () => {
     expect(room.forceTeamApproval).toBe(false);
   });
 
+  it("publishes each player's team vote only after the entire vote is complete", () => {
+    const { manager, room, players } = createStartedRoom();
+    manager.startGame(room, players[0]);
+    const leader = players[room.leaderIndex];
+    expect(manager.selectTeam(room, leader, players.slice(0, 2).map((player) => player.id)).ok).toBe(true);
+
+    players.slice(0, -1).forEach((player, index) => {
+      manager.voteTeam(room, player, index < 2);
+      expect(manager.createUpdate(room, player).publicState.lastTeamVotes).toEqual([]);
+    });
+    manager.voteTeam(room, players.at(-1)!, false);
+
+    const publicState = manager.createUpdate(room, players[0]).publicState;
+    expect(publicState.phase).toBe("SELECT_TEAM");
+    expect(publicState.lastTeamVotes).toHaveLength(players.length);
+    expect(publicState.lastTeamVotes.find((vote) => vote.playerId === players[0].id)?.approve).toBe(true);
+    expect(publicState.lastTeamVotes.find((vote) => vote.playerId === players[4].id)?.approve).toBe(false);
+  });
+
   it.each([3, 4, 5])("opens the invasion phase after a mission in round %i, including a third success", (round) => {
     const { room } = createInvasionRoom(round);
     expect(room.successCount).toBe(3);
@@ -164,6 +183,13 @@ describe("RoomManager", () => {
     expect(room.phase).toBe("ENDED");
     expect(room.winner).toBe("MAGICAL_GIRL");
     expect(room.logs.at(-1)).toContain("未命中凭依者");
+  });
+
+  it("limits invasion targets to the fixed Magical Girl alignment, not swapped identity cards", () => {
+    const { manager, room, players } = createInvasionRoom();
+    room.identities.set(players[1].id, getIdentity("witch"));
+    expect(manager.invade(room, players[2], players[1].id)).toEqual({ ok: true });
+    expect(room.winner).toBe("MAGICAL_GIRL");
   });
 
   it("rejects non-Witches and invalid invasion targets without exposing or resolving a choice", () => {
@@ -239,6 +265,36 @@ describe("RoomManager", () => {
     expect(room.magicUserId).toBe(players[1].id);
   });
 
+  it("allows election voters to abstain and skips magic when every voter abstains", () => {
+    const { manager, room, players } = createStartedRoom();
+    manager.startGame(room, players[0]);
+    room.round = 3;
+    room.phase = "MAGIC_CANDIDACY";
+    for (const player of players) manager.declareMagicCandidacy(room, player, player === players[0]);
+    expect(room.phase).toBe("MAGIC_VOTE");
+
+    for (const player of players.slice(1)) {
+      expect(manager.voteMagic(room, player, null)).toEqual({ ok: true });
+    }
+    expect(room.phase).toBe("SELECT_TEAM");
+    expect(room.magicUserId).toBeNull();
+    expect(room.magicElectionDone).toBe(true);
+  });
+
+  it("rejects ordinary magic-pass attempts because the elected player must use their magic", () => {
+    const { manager, room, players } = createStartedRoom();
+    manager.startGame(room, players[0]);
+    room.characters.set(players[0].id, "meruru");
+    room.magicUserId = players[0].id;
+    room.phase = "MAGIC_USE";
+
+    expect(manager.useMagic(room, players[0], { type: "PASS" })).toEqual({
+      ok: false,
+      error: "魔法竞选胜者必须立即发动角色魔法。"
+    });
+    expect(room.phase).toBe("MAGIC_USE");
+  });
+
   it("skips the election when nobody declares candidacy", () => {
     const { manager, room, players } = createStartedRoom();
     manager.startGame(room, players[0]);
@@ -306,6 +362,9 @@ describe("RoomManager", () => {
     room.alignments.set(players[0].id, "WITCH");
     room.identities.set(players[0].id, getIdentity("goodWitch"));
     room.identities.set(players[1].id, getIdentity("possessed"));
+    room.identities.set(players[2].id, getIdentity("detective"));
+    room.alignments.set(players[1].id, "MAGICAL_GIRL");
+    room.alignments.set(players[2].id, "MAGICAL_GIRL");
     room.magicUserId = players[0].id;
     room.magicAbilityUsed = false;
     room.phase = "INVASION_MAGIC";
@@ -317,14 +376,13 @@ describe("RoomManager", () => {
     expect(manager.useMagic(room, players[0], {
       type: "SWAP_IDENTITIES",
       firstId: players[0].id,
-      secondId: players[1].id
+      secondId: players[2].id
     })).toEqual({ ok: true });
-    expect(room.identities.get(players[0].id)?.id).toBe("possessed");
+    expect(room.identities.get(players[0].id)?.id).toBe("detective");
     const swappedState = manager.createUpdate(room, players[0]).privateState;
     expect(swappedState?.alignment).toBe("WITCH");
     expect(swappedState?.identity.camp).toBe("MAGICAL_GIRL");
-    room.alignments.set(players[2].id, "WITCH");
-    expect(manager.invade(room, players[2], players[0].id)).toEqual({ ok: true });
+    expect(manager.invade(room, players[0], players[1].id)).toEqual({ ok: true });
     expect(room.winner).toBe("WITCH");
   });
 
@@ -456,16 +514,46 @@ describe("RoomManager", () => {
     manager.startGame(room, players[0]);
     room.characters.set(players[0].id, "hanna");
     players[0].characterId = "hanna";
+    room.alignments.set(players[0].id, "MAGICAL_GIRL");
     room.magicUserId = players[0].id;
     room.magicAbilityUsed = true;
     room.magicEffect.extraActionCount = 1;
     room.round = 3;
     room.leaderIndex = 0;
     expect(manager.selectTeam(room, players[0], [players[0].id])).toEqual({ ok: true });
+    expect(manager.createUpdate(room, players[0]).publicState.hannaCountsAsTwo).toBe(true);
     for (const player of players) manager.voteTeam(room, player, true);
     expect(manager.missionAction(room, players[0], ["SUCCESS", "SUCCESS"])).toEqual({ ok: true });
     expect(room.successCount).toBe(1);
     expect(room.phase).toBe("INVASION");
+  });
+
+  it("does not grant Hanna Witch double actions, but enables her sabotage decision", () => {
+    const { manager, room, players } = createStartedRoom();
+    manager.startGame(room, players[0]);
+    room.characters.set(players[0].id, "hanna");
+    players[0].characterId = "hanna";
+    room.alignments.set(players[0].id, "WITCH");
+    room.identities.set(players[0].id, getIdentity("goodWitch"));
+    room.magicUserId = players[0].id;
+    room.phase = "MAGIC_USE";
+    room.round = 3;
+    expect(manager.useMagic(room, players[0], {
+      type: "SET_MISSION_EFFECT",
+      effect: "ADD_MISSION_ACTION"
+    })).toEqual({ ok: true });
+    expect(room.magicEffect.extraActionCount).toBe(0);
+    expect(manager.createUpdate(room, players[0]).publicState.hannaCountsAsTwo).toBe(false);
+
+    room.phase = "MISSION_ACTION";
+    room.currentTeam = [players[0].id, players[1].id];
+    expect(manager.missionAction(room, players[0], ["FAIL", "FAIL"])).toEqual({
+      ok: false,
+      error: "每位队员只能提交一次决定。"
+    });
+    expect(manager.missionAction(room, players[0], "FAIL")).toEqual({ ok: true });
+    expect(manager.missionAction(room, players[1], "SUCCESS")).toEqual({ ok: true });
+    expect(room.failCount).toBe(1);
   });
 
   it("rejects a malformed team payload without throwing", () => {
@@ -722,6 +810,7 @@ describe("RoomManager", () => {
     expect(room.round).toBe(2);
     expect(room.phase).toBe("SELECT_TEAM");
     expect(room.failCount).toBe(0);
+    expect(room.publicFailCount).toBe(0);
     room.phase = "MISSION_ACTION";
     room.currentTeam = [players[1].id];
     expect(manager.missionAction(room, players[1], "SUCCESS")).toEqual({ ok: true });
@@ -730,7 +819,7 @@ describe("RoomManager", () => {
     expect(manager.createUpdate(room, players[0]).privateState?.magic.magicResult).toContain("重开的第二轮结果：破解成功");
     expect(manager.createUpdate(room, players[1]).publicState.lastMissionResult).toBeNull();
     expect(manager.createUpdate(room, players[1]).publicState.successCount).toBe(1);
-    expect(manager.createUpdate(room, players[1]).publicState.failCount).toBe(1);
+    expect(manager.createUpdate(room, players[1]).publicState.failCount).toBe(0);
   });
 
   it("blocks the chosen invasion window for Magical Girl Arisa but not Witch Arisa", () => {
@@ -763,6 +852,26 @@ describe("RoomManager", () => {
       round: 3
     })).toEqual({ ok: true });
     expect(otherGame.room.magicEffect.invasionBlockedRound).toBeNull();
+  });
+
+  it("wins immediately when Arisa blocks invasion after the Magical Girls complete three missions", () => {
+    const { manager, room, players } = createStartedRoom();
+    manager.startGame(room, players[0]);
+    room.characters.set(players[0].id, "arisa");
+    room.alignments.set(players[0].id, "MAGICAL_GIRL");
+    room.magicUserId = players[0].id;
+    room.magicAbilityUsed = true;
+    room.magicEffect.invasionBlockedRound = 3;
+    room.round = 3;
+    room.successCount = 2;
+    room.publicSuccessCount = 2;
+    room.phase = "MISSION_ACTION";
+    room.currentTeam = [players[1].id, players[2].id];
+    room.missionActions.set(players[1].id, ["SUCCESS"]);
+
+    expect(manager.missionAction(room, players[2], "SUCCESS")).toEqual({ ok: true });
+    expect(room.phase).toBe("ENDED");
+    expect(room.winner).toBe("MAGICAL_GIRL");
   });
 
   it("lets Witch Naya privately see the true identity while publicly claiming a false one", () => {
@@ -809,7 +918,7 @@ describe("RoomManager", () => {
     expect(accusationLog).not.toContain(players[2].name);
   });
 
-  it("allows Hanna Witch to submit two actions including sabotage", () => {
+  it("allows Hanna Witch to submit a sabotage decision without Magical Girl double actions", () => {
     const { manager, room, players } = createStartedRoom();
     manager.startGame(room, players[0]);
     room.characters.set(players[0].id, "hanna");
@@ -817,11 +926,15 @@ describe("RoomManager", () => {
     room.identities.set(players[0].id, getIdentity("goodWitch"));
     room.magicUserId = players[0].id;
     room.magicAbilityUsed = true;
-    room.magicEffect.extraActionCount = 1;
+    room.magicEffect.hannaWitchSabotage = true;
     room.round = 3;
     room.phase = "MISSION_ACTION";
     room.currentTeam = [players[0].id];
-    expect(manager.missionAction(room, players[0], ["SUCCESS", "FAIL"])).toEqual({ ok: true });
+    expect(manager.missionAction(room, players[0], ["SUCCESS", "FAIL"])).toEqual({
+      ok: false,
+      error: "每位队员只能提交一次决定。"
+    });
+    expect(manager.missionAction(room, players[0], "FAIL")).toEqual({ ok: true });
     expect(room.failCount).toBe(1);
     expect(room.phase).toBe("INVASION");
   });

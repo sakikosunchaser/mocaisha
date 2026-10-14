@@ -78,7 +78,9 @@ export interface PublicGameState {
   failCount: number;
   currentTeam: string[];
   teamSize: number;
+  hannaCountsAsTwo: boolean;
   teamVotesSubmitted: number;
+  lastTeamVotes: Array<{ playerId: string; approve: boolean }>;
   missionActionsSubmitted: number;
   failedProposals: number;
   forceTeamApproval: boolean;
@@ -116,6 +118,7 @@ export interface PrivateGameState {
   identity: Identity;
   alignment: Camp;
   canSabotage: boolean;
+  invasionTargets: string[];
   privateMessage: string;
   isOnTeam: boolean;
   hasVoted: boolean;
@@ -167,7 +170,7 @@ export interface ClientToServerEvents {
   "game:continue": (callback: (response: ActionResponse) => void) => void;
   "game:invade": (targetPlayerId: string, callback: (response: ActionResponse) => void) => void;
   "game:magic-candidacy": (isCandidate: boolean, callback: (response: ActionResponse) => void) => void;
-  "game:magic-vote": (candidateId: string, callback: (response: ActionResponse) => void) => void;
+  "game:magic-vote": (candidateId: string | null, callback: (response: ActionResponse) => void) => void;
   "game:use-magic": (action: MagicAction, callback: (response: ActionResponse) => void) => void;
   "game:resolve-magic": (action: MagicAction, callback: (response: ActionResponse) => void) => void;
 }

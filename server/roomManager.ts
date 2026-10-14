@@ -47,6 +47,7 @@ interface GameRoom {
   publicFailCount: number;
   currentTeam: string[];
   teamVotes: Map<string, boolean>;
+  lastTeamVotes: Map<string, boolean>;
   missionActions: Map<string, MissionAction[]>;
   failedProposals: number;
   forceTeamApproval: boolean;
@@ -57,7 +58,7 @@ interface GameRoom {
   candidacyVotes: Map<string, boolean>;
   magicCandidates: string[];
   magicElectorate: string[];
-  magicVotes: Map<string, string>;
+  magicVotes: Map<string, string | null>;
   magicRunoff: boolean;
   magicUserId: string | null;
   magicAbilityUsed: boolean;
@@ -69,6 +70,7 @@ interface GameRoom {
     hiddenMissionResult: boolean;
     revealActualSaboteur: boolean;
     extraActionCount: number;
+    hannaWitchSabotage: boolean;
     reiaOwnAction: MissionAction | null;
     emmaWitchArmed: boolean;
   };
@@ -112,6 +114,7 @@ export class RoomManager {
       publicFailCount: 0,
       currentTeam: [],
       teamVotes: new Map(),
+      lastTeamVotes: new Map(),
       missionActions: new Map(),
       failedProposals: 0,
       forceTeamApproval: false,
@@ -134,6 +137,7 @@ export class RoomManager {
         hiddenMissionResult: false,
         revealActualSaboteur: false,
         extraActionCount: 0,
+        hannaWitchSabotage: false,
         reiaOwnAction: null,
         emmaWitchArmed: false
       },
@@ -274,6 +278,7 @@ export class RoomManager {
 
     room.currentTeam = [...playerIds];
     room.teamVotes.clear();
+    room.lastTeamVotes.clear();
     room.missionActions.clear();
     room.shuffledMissionDecisions = null;
     room.lastMissionResult = null;
@@ -310,6 +315,7 @@ export class RoomManager {
     }
     const characterId = room.characters.get(room.magicUserId ?? "");
     const expectedActions = room.round === 3 && player.id === room.magicUserId
+      && room.alignments.get(player.id) === "MAGICAL_GIRL"
       && characterId === "hanna" && room.magicEffect.extraActionCount > 0 ? 2 : 1;
     if (actions.length !== expectedActions) {
       return this.reject(expectedActions === 2 ? "远野汉娜第三轮需要提交两次决定。" : "每位队员只能提交一次决定。");
@@ -402,6 +408,9 @@ export class RoomManager {
       return this.reject("没有找到你的角色或身份。");
     }
     if (action.type === "PASS") {
+      if (characterId !== "milia") {
+        return this.reject("魔法竞选胜者必须立即发动角色魔法。");
+      }
       room.magicAbilityUsed = characterId !== "milia";
       room.magicElectionDone = true;
       room.phase = "SELECT_TEAM";
@@ -420,11 +429,13 @@ export class RoomManager {
     return { ok: true };
   }
 
-  voteMagic(room: GameRoom, player: PlayerRecord, candidateId: string): Result {
+  voteMagic(room: GameRoom, player: PlayerRecord, candidateId: string | null): Result {
     if (room.phase !== "MAGIC_VOTE") return this.reject("当前不是魔法竞选投票阶段。");
     if (!room.magicElectorate.includes(player.id)) return this.reject("竞选者不能参与本轮投票。");
     if (room.magicVotes.has(player.id)) return this.reject("你已经投过竞选票了。");
-    if (!room.magicCandidates.includes(candidateId)) return this.reject("请选择一位当前候选人。");
+    if (candidateId !== null && !room.magicCandidates.includes(candidateId)) {
+      return this.reject("请选择一位当前候选人或弃票。");
+    }
     room.magicVotes.set(player.id, candidateId);
     if (room.magicVotes.size === room.magicElectorate.length) this.resolveMagicVote(room);
     return { ok: true };
@@ -611,6 +622,9 @@ export class RoomManager {
 
     const targetIdentity = room.identities.get(targetPlayerId);
     if (!targetIdentity) return this.reject("没有找到目标玩家的身份信息。");
+    if (room.alignments.get(targetPlayerId) !== "MAGICAL_GIRL") {
+      return this.reject("侵染目标必须属于魔法少女阵营。");
+    }
     room.phase = "ENDED";
     room.winner = targetIdentity.id === "possessed" ? "WITCH" : "MAGICAL_GIRL";
     this.addLog(
@@ -655,6 +669,11 @@ export class RoomManager {
           identity,
           alignment: room.alignments.get(player.id) ?? identity.camp,
           canSabotage: this.canSabotage(room, player.id, identity),
+          invasionTargets: room.phase === "INVASION" && room.alignments.get(player.id) === "WITCH"
+            ? room.players
+                .filter((entry) => room.alignments.get(entry.id) === "MAGICAL_GIRL")
+                .map((entry) => entry.id)
+            : [],
           privateMessage: room.privateMessages.get(player.id) ?? "暂时没有额外的身份情报。",
           isOnTeam: room.currentTeam.includes(player.id),
           hasVoted: room.teamVotes.has(player.id),
@@ -693,6 +712,7 @@ export class RoomManager {
   }
 
   private resolveTeamVote(room: GameRoom): void {
+    room.lastTeamVotes = new Map(room.teamVotes);
     const approvals = [...room.teamVotes.values()].filter(Boolean).length;
     const rejections = room.players.length - approvals;
     if (approvals > room.players.length / 2) {
@@ -703,7 +723,6 @@ export class RoomManager {
     }
 
     room.failedProposals += 1;
-    room.teamVotes.clear();
     room.phase = "SELECT_TEAM";
     this.addLog(room, `队伍投票未通过（赞成 ${approvals}，反对 ${rejections}）。`);
     if (room.failedProposals >= 3) {
@@ -749,7 +768,15 @@ export class RoomManager {
   private resolveMagicVote(room: GameRoom): void {
     const counts = new Map<string, number>();
     for (const candidateId of room.magicVotes.values()) {
+      if (candidateId === null) continue;
       counts.set(candidateId, (counts.get(candidateId) ?? 0) + 1);
+    }
+    if (counts.size === 0) {
+      room.magicAbilityUsed = true;
+      room.magicElectionDone = true;
+      room.phase = "SELECT_TEAM";
+      this.addLog(room, "魔法竞选中所有投票者均弃票，本次竞选跳过。");
+      return;
     }
     const highestVotes = Math.max(...counts.values());
     const topCandidates = room.magicCandidates.filter((id) => counts.get(id) === highestVotes);
@@ -838,8 +865,14 @@ export class RoomManager {
     }
     if (action.type === "REPLAY_ROUND_TWO" && characterId === "hiro" && alignment === "MAGICAL_GIRL") {
       if (room.round !== 3 || !room.lastMissionResult) return this.reject("没有可重开的第二轮结果。");
-      if (room.lastMissionResult.succeeded) room.successCount = Math.max(0, room.successCount - 1);
-      else room.failCount = Math.max(0, room.failCount - 1);
+      const previousResult = room.lastMissionResult;
+      if (previousResult.succeeded) {
+        room.successCount = Math.max(0, room.successCount - 1);
+        room.publicSuccessCount = Math.max(0, room.publicSuccessCount - 1);
+      } else {
+        room.failCount = Math.max(0, room.failCount - 1);
+        room.publicFailCount = Math.max(0, room.publicFailCount - 1);
+      }
       room.replayRoundTwoBy = player.id;
       room.lastMissionResult = null;
       room.round = 2;
@@ -929,7 +962,8 @@ export class RoomManager {
       return { ok: true };
     }
     if (characterId === "hanna" && action.effect === "ADD_MISSION_ACTION") {
-      room.magicEffect.extraActionCount = 1;
+      if (alignment === "MAGICAL_GIRL") room.magicEffect.extraActionCount = 1;
+      else room.magicEffect.hannaWitchSabotage = true;
       return { ok: true };
     }
     if (characterId === "coco" && alignment === "MAGICAL_GIRL" && action.effect === "HIDDEN_RESULT") {
@@ -985,6 +1019,7 @@ export class RoomManager {
       room.round === 3
       && room.magicAbilityUsed
       && room.magicUserId
+      && room.alignments.get(room.magicUserId) === "MAGICAL_GIRL"
       && room.characters.get(room.magicUserId) === "hanna"
       && room.magicEffect.extraActionCount > 0
       && selectedPlayerIds.includes(room.magicUserId)
@@ -1055,8 +1090,14 @@ export class RoomManager {
       this.addLog(room, "魔女阵营破坏三次机关，获得胜利。");
     } else if (room.round >= 3 && room.round <= MAX_ROUNDS) {
       if (room.magicEffect.invasionBlockedRound === room.round) {
-        room.phase = "MISSION_RESULT";
-        this.addLog(room, `第 ${room.round} 轮侵染被封锁，游戏继续。`);
+        if (room.successCount >= 3) {
+          room.phase = "ENDED";
+          room.winner = "MAGICAL_GIRL";
+          this.addLog(room, `第 ${room.round} 轮侵染被封锁，魔法少女阵营已破解三处机关并获胜。`);
+        } else {
+          room.phase = "MISSION_RESULT";
+          this.addLog(room, `第 ${room.round} 轮侵染被封锁，游戏继续。`);
+        }
       } else {
         room.phase = room.magicUserId && room.characters.get(room.magicUserId) === "milia" && !room.magicAbilityUsed
           ? "INVASION_MAGIC"
@@ -1094,7 +1135,17 @@ export class RoomManager {
       failCount: room.publicFailCount,
       currentTeam: [...room.currentTeam],
       teamSize: room.phase === "LOBBY" ? 0 : this.getRequiredTeamSize(room),
+      hannaCountsAsTwo: Boolean(
+        room.magicAbilityUsed
+        && room.magicUserId
+        && room.alignments.get(room.magicUserId) === "MAGICAL_GIRL"
+        && room.characters.get(room.magicUserId) === "hanna"
+        && room.magicEffect.extraActionCount > 0
+      ),
       teamVotesSubmitted: room.teamVotes.size,
+      lastTeamVotes: room.phase === "TEAM_VOTE" && room.teamVotes.size < room.players.length
+        ? []
+        : [...room.lastTeamVotes.entries()].map(([playerId, approve]) => ({ playerId, approve })),
       missionActionsSubmitted: room.missionActions.size,
       failedProposals: room.failedProposals,
       forceTeamApproval: room.forceTeamApproval,
@@ -1126,9 +1177,9 @@ export class RoomManager {
       && room.alignments.get(room.magicUserId) === "WITCH";
     const hannaAbilityActive = magicAbilityActive
       && room.magicUserId === playerId
-      && room.round === 3
+      && room.alignments.get(playerId) === "WITCH"
       && characterId === "hanna"
-      && room.magicEffect.extraActionCount > 0;
+      && room.magicEffect.hannaWitchSabotage;
     return identity.canSabotage || magaAbilityActive || hannaAbilityActive;
   }
 

@@ -163,6 +163,8 @@ button:disabled { cursor: not-allowed; opacity: .48; }
 .team-member { cursor: default; }
 .team-member:hover { border-color: rgba(225,219,237,.095); background: rgba(255,255,255,.018); }
 .member-check { margin-left: auto; color: #8e8998; font-size: 9px; }
+.team-vote-results { display: flex; flex-wrap: wrap; gap: 7px 13px; margin-top: 15px; padding: 12px; border: 1px solid rgba(225,219,237,.075); border-radius: 4px; color: #aaa6b4; font-size: 10px; }
+.team-vote-results strong { width: 100%; color: var(--gold-light); font-weight: 500; }
 .vote-actions, .mission-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin-top: 15px; }
 .button-vote-no { border-color: rgba(239,142,156,.3); background: rgba(239,142,156,.075); color: #f1a4af; }
 .button-vote-no:not(:disabled):hover, .button-mission-fail:not(:disabled):hover { background: rgba(239,142,156,.15); }

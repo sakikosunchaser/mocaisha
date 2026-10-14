@@ -604,7 +604,7 @@ function GameActionPanel({
   const invasionTargets = publicState.players;
   const requiredTeamSize = Math.max(
     1,
-    publicState.teamSize - (publicState.round === 3 && publicState.magicAbilityUsed && selectedIds.includes(hannaPlayerId ?? "") ? 1 : 0)
+    publicState.teamSize - (publicState.round === 3 && publicState.hannaCountsAsTwo && selectedIds.includes(hannaPlayerId ?? "") ? 1 : 0)
   );
   let heading = "";
   let description = "";
@@ -629,7 +629,7 @@ function GameActionPanel({
     description = "选择是否参加竞选。候选人不能参与本轮投票。";
   } else if (phase === "MAGIC_VOTE") {
     heading = publicState.magicTiedVote ? "并列候选人重投" : "投票选出魔法使用者";
-    description = publicState.magicTiedVote ? "仅并列候选人参与本轮重投。" : "未参选玩家为候选人投票。";
+    description = publicState.magicTiedVote ? "仅并列候选人参与本轮重投，也可以弃票。" : "未参选玩家为候选人投票，也可以弃票。";
   } else if (phase === "MAGIC_USE") {
     heading = privateState?.magic.isMagicUser ? "发动你的角色魔法" : "魔法竞选已结束";
     description = privateState?.magic.isMagicUser ? "角色技能由服务器判定，请确认后发动。" : "等待竞选胜者发动魔法。";
@@ -702,7 +702,7 @@ function GameActionPanel({
         privateState?.isOnTeam ? privateState.hasActed ? (
           <div className="waiting-state"><span className="pulse-dot" />行动已提交 · 等待队友（{publicState.missionActionsSubmitted}/{teamPlayers.length}）</div>
         ) : (
-          publicState.round === 3 && privateState.magic.isMagicUser && publicState.players.find((player) => player.id === playerId)?.characterId === "hanna" ? (
+          publicState.round === 3 && privateState.alignment === "MAGICAL_GIRL" && privateState.magic.isMagicUser && publicState.players.find((player) => player.id === playerId)?.characterId === "hanna" ? (
             <div className="mission-actions mission-double-actions">
               <button className="button button-mission-success" disabled={busy} onClick={() => onAction((callback) => socket.emit("game:mission-action", ["SUCCESS", "SUCCESS"], callback))}>两次破解</button>
               {privateState.canSabotage && <>
@@ -742,7 +742,7 @@ function GameActionPanel({
               <p>这是最后一次判断。<br />目标选择后立即结算，且不会公开谁做出的选择。</p>
             </div>
             <div className="candidate-list invasion-target-list">
-              {invasionTargets.map((player) => (
+              {invasionTargets.filter((player) => privateState.invasionTargets.includes(player.id)).map((player) => (
                 <button
                   className="candidate invasion-target"
                   disabled={busy}
@@ -759,6 +759,16 @@ function GameActionPanel({
         ) : (
           <div className="waiting-state"><span className="pulse-dot" />等待魔女阵营完成侵染判定</div>
         )
+      )}
+
+      {publicState.lastTeamVotes.length > 0 && (
+        <div className="team-vote-results" aria-live="polite">
+          <strong>上一轮组队票型</strong>
+          {publicState.lastTeamVotes.map((vote) => {
+            const voter = publicState.players.find((player) => player.id === vote.playerId);
+            return <span key={vote.playerId}>{voter?.name ?? "玩家"}：{vote.approve ? "赞成" : "反对"}</span>;
+          })}
+        </div>
       )}
 
       {(phase === "MAGIC_CANDIDACY" || phase === "MAGIC_VOTE" || phase === "MAGIC_USE" || phase === "MAGIC_RESOLUTION" || phase === "INVASION_MAGIC") && (
@@ -866,18 +876,21 @@ function MagicStagePanel({
       return <div className="waiting-state"><span className="pulse-dot" />{magic.hasVotedMagic ? "已投票" : "本轮不在投票范围内"} · 等待其他玩家（{publicState.magicVotesSubmitted}/{publicState.magicElectorateSize}）</div>;
     }
     return (
-      <div className="candidate-list">
-        {publicState.magicCandidates.map((candidateId) => {
-          const candidate = publicState.players.find((player) => player.id === candidateId);
-          if (!candidate) return null;
-          return (
-            <button className="candidate" disabled={busy} key={candidate.id} onClick={() => onAction((callback) => socket.emit("game:magic-vote", candidate.id, callback))}>
-              <span className={`player-avatar avatar-${candidate.seatIndex % 6}`}>{candidate.name.slice(0, 1)}</span>
-              <span>{candidate.name}</span><span className="candidate-check">投票</span>
-            </button>
-          );
-        })}
-      </div>
+      <>
+        <div className="candidate-list">
+          {publicState.magicCandidates.map((candidateId) => {
+            const candidate = publicState.players.find((player) => player.id === candidateId);
+            if (!candidate) return null;
+            return (
+              <button className="candidate" disabled={busy} key={candidate.id} onClick={() => onAction((callback) => socket.emit("game:magic-vote", candidate.id, callback))}>
+                <span className={`player-avatar avatar-${candidate.seatIndex % 6}`}>{candidate.name.slice(0, 1)}</span>
+                <span>{candidate.name}</span><span className="candidate-check">投票</span>
+              </button>
+            );
+          })}
+        </div>
+        <button className="button button-secondary action-submit" disabled={busy} onClick={() => onAction((callback) => socket.emit("game:magic-vote", null, callback))}>弃票</button>
+      </>
     );
   }
 
@@ -905,7 +918,7 @@ function MagicStagePanel({
   }
 
   if (phase === "MAGIC_USE") {
-    let controls = <>{actionButton("保留魔法", sendNoop)}</>;
+    let controls = <>{actionButton("发动魔法", sendNoop)}</>;
     if (characterId === "emma") {
       controls = <>{actionButton("发动魔法", () => sendUse({ type: "SET_MISSION_EFFECT", effect: privateState.alignment === "WITCH" ? "ARM_EMMA_WITCH" : "BLOCK_WITCH_FAIL" }))}</>;
     } else if (characterId === "hiro") {
@@ -943,9 +956,10 @@ function MagicStagePanel({
         ? <>{actionButton("将第二轮改为破解", () => sendUse({ type: "CHANGE_ROUND_TWO_RESULT", succeeded: true }))}</>
         : <><label className="magic-choice">将第二轮改为 <select value={choice} onChange={(event) => setChoice(event.target.value as MissionAction)}><option value="SUCCESS">破解</option><option value="FAIL">破坏</option></select></label>{actionButton("确认改写", () => sendUse({ type: "CHANGE_ROUND_TWO_RESULT", succeeded: choice === "SUCCESS" }))}</>;
     } else if (characterId === "coco") {
-      controls = privateState.alignment === "WITCH"
-        ? <>{actionButton("进入第三轮结算", sendNoop)}</>
-        : <>{actionButton("进入第三轮结算", sendNoop)}</>;
+      controls = <>{actionButton("发动窥探", () => sendUse({
+        type: "SET_MISSION_EFFECT",
+        effect: privateState.alignment === "WITCH" ? "REPLACE_MISSION_ACTION" : "HIDDEN_RESULT"
+      }))}</>;
     } else if (characterId === "meruru") {
       controls = <div className="magic-form-row">
         {targetSelect}
@@ -953,12 +967,10 @@ function MagicStagePanel({
         {actionButton("查验并公布", () => sendUse({ type: "INVESTIGATE_CAMP", targetId, claimSame: privateState.alignment === "MAGICAL_GIRL" ? true : choice === "SUCCESS" }), !targetId)}
       </div>;
     }
-    const hasCustomPass = characterId === "milia" || characterId === "coco";
     return (
       <>
         <div className="skill-description">{skill}</div>
         {controls}
-        {!hasCustomPass && actionButton("保留魔法", sendNoop)}
       </>
     );
   }
