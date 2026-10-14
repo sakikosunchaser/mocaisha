@@ -1,0 +1,90 @@
+name: Deploy Mosaica
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mosaica-production-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Build and test
+        run: |
+          npm ci
+          npm test
+          npm run build
+
+      - name: Package source
+        run: |
+          tar -czf "$RUNNER_TEMP/mosaica.tar.gz" \
+            --exclude=.git \
+            --exclude=node_modules \
+            --exclude=dist \
+            --exclude=server-dist \
+            .
+
+      - name: Configure SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          test -n "$DEPLOY_SSH_KEY" || { echo "Missing DEPLOY_SSH_KEY secret"; exit 1; }
+          test -n "$DEPLOY_KNOWN_HOSTS" || { echo "Missing DEPLOY_KNOWN_HOSTS secret"; exit 1; }
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Upload and restart production service
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+        run: |
+          test -n "$DEPLOY_HOST" || { echo "Missing DEPLOY_HOST secret"; exit 1; }
+          test -n "$DEPLOY_USER" || { echo "Missing DEPLOY_USER secret"; exit 1; }
+          DEPLOY_PORT="${DEPLOY_PORT:-22}"
+          SSH_OPTIONS="-o BatchMode=yes -o StrictHostKeyChecking=yes"
+          scp -P "$DEPLOY_PORT" $SSH_OPTIONS \
+            "$RUNNER_TEMP/mosaica.tar.gz" \
+            "$DEPLOY_USER@$DEPLOY_HOST:/tmp/mosaica-deploy.tar.gz"
+          ssh -p "$DEPLOY_PORT" $SSH_OPTIONS "$DEPLOY_USER@$DEPLOY_HOST" '
+            set -eu
+            tar -xzf /tmp/mosaica-deploy.tar.gz -C /opt/mosaica
+            cd /opt/mosaica
+            npm ci
+            npm test
+            npm run build
+            npm prune --omit=dev
+            sudo -n /usr/bin/systemctl restart mosaica
+            for attempt in $(seq 1 20); do
+              if curl --fail --silent http://127.0.0.1:3001/health >/dev/null; then
+                echo "Mosaica deployment is healthy."
+                exit 0
+              fi
+              sleep 1
+            done
+            echo "Mosaica health check failed after restart."
+            sudo -n /usr/bin/systemctl status mosaica --no-pager -l
+            exit 1
+          '
