@@ -41,7 +41,7 @@ npm test
 
 将项目放进 GitHub 仓库后，推送到 `main` 或 `master` 分支会自动运行测试、构建并部署到服务器；也可在 GitHub Actions 页面手动运行部署。首次配置只需一次：
 
-1. 在 GitHub 创建**私有仓库**，先不要推送代码；先完成服务器 SSH 部署账号和仓库 Secrets 配置，再首次推送到 `main`。
+1. 在 GitHub 创建空仓库，并确认可见性。当前配置的 `sakikosunchaser/mocaisha` 是公开仓库，推送后所有人都可以查看代码；如要保护源码，应先在 GitHub 将其改为私有。首次推送前，先完成服务器 SSH 部署账号和仓库 Secrets 配置。
 2. 在服务器上创建专用部署账号，并允许其写入 `/opt/mosaica`、重启服务：
 
    ```bash
@@ -49,6 +49,11 @@ npm test
    useradd --create-home --shell /bin/bash mosaica-deploy
    install -d -o mosaica-deploy -g mosaica-deploy /opt/mosaica
    chown -R mosaica-deploy:mosaica-deploy /opt/mosaica
+   install -d /etc/systemd/system/mosaica.service.d
+   printf '[Service]\nUser=mosaica-deploy\nGroup=mosaica-deploy\n' > /etc/systemd/system/mosaica.service.d/override.conf
+   systemctl daemon-reload
+   systemctl restart mosaica
+   systemctl status mosaica --no-pager -l
    printf '%s\n' 'mosaica-deploy ALL=(root) NOPASSWD: /usr/bin/systemctl restart mosaica, /usr/bin/systemctl status mosaica --no-pager -l' > /etc/sudoers.d/mosaica-deploy
    chmod 440 /etc/sudoers.d/mosaica-deploy
    visudo -cf /etc/sudoers.d/mosaica-deploy
