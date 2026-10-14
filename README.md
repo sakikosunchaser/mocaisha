@@ -49,25 +49,36 @@ git commit -m "Describe your changes"
 git push origin main
 ```
 
-服务器更新需单独手动进行。在项目目录的 PowerShell 中打包并上传（按需替换服务器地址或登录账号）：
+服务器更新需单独手动进行。此公开仓库可通过 HTTPS 直接克隆，不需要 SSH 密钥或 GitHub token。
 
-```powershell
-tar -czf "$env:TEMP\mosaica.tar.gz" --exclude=.git --exclude=node_modules --exclude=dist --exclude=server-dist --exclude=.env --exclude=".env.*" .
-scp "$env:TEMP\mosaica.tar.gz" root@110.42.33.50:/tmp/mosaica.tar.gz
-ssh root@110.42.33.50
-```
-
-登录服务器后执行：
+首次从服务器部署时，在服务器终端以 root 执行以下命令。它会先在新目录克隆、测试和构建；成功后才切换 `/opt/mosaica`，并保留旧版本备份：
 
 ```bash
-tar -xzf /tmp/mosaica.tar.gz -C /opt/mosaica
-cd /opt/mosaica
-npm ci
-npm test
-npm run build
-npm prune --omit=dev
+apt update && apt install -y git
+cd /opt
+DEPLOY_DIR="/opt/mosaica-next-$(date +%Y%m%d-%H%M%S)"
+BACKUP_DIR="/opt/mosaica-backup-$(date +%Y%m%d-%H%M%S)"
+git clone --branch main https://github.com/sakikosunchaser/mocaisha.git "$DEPLOY_DIR"
+chown -R mosaica-deploy:mosaica-deploy "$DEPLOY_DIR"
+runuser -u mosaica-deploy -- bash -lc "cd '$DEPLOY_DIR' && npm ci && npm test && npm run build && npm prune --omit=dev"
+```
+
+只有在上面的测试和构建全部成功后，再切换并检查服务：
+
+```bash
+systemctl stop mosaica
+mv /opt/mosaica "$BACKUP_DIR"
+mv "$DEPLOY_DIR" /opt/mosaica
+systemctl start mosaica
+curl -fsS http://127.0.0.1:3001/health
+```
+
+之后每次更新，在服务器 root 终端执行以下命令，从 GitHub 拉取最新 `main`、测试构建并重启服务：
+
+```bash
+runuser -u mosaica-deploy -- bash -lc 'cd /opt/mosaica && git pull --ff-only origin main && npm ci && npm test && npm run build && npm prune --omit=dev'
 systemctl restart mosaica
 curl -fsS http://127.0.0.1:3001/health
 ```
 
-请勿上传 `.env` 或 SSH 私钥。
+如果更新失败，不要重启服务；当前运行的版本会继续提供服务。请勿在仓库或服务器项目目录中保存 SSH 私钥。
